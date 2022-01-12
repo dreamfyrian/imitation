@@ -21,15 +21,15 @@ class HardCodedPolicy(policies.BasePolicy, abc.ABC):
     def _predict(self, obs: th.Tensor, deterministic: bool = False):
         np_actions = []
         np_obs = obs.detach().cpu().numpy()
-        for np_ob in np_obs:
+        for idx, np_ob in enumerate(np_obs):
             assert self.observation_space.contains(np_ob)
-            np_actions.append(self._choose_action(np_ob))
+            np_actions.append(self._choose_action(np_ob, idx))
         np_actions = np.stack(np_actions, axis=0)
         th_actions = th.as_tensor(np_actions, device=self.device)
         return th_actions
 
     @abc.abstractmethod
-    def _choose_action(self, obs: np.ndarray) -> np.ndarray:
+    def _choose_action(self, obs: np.ndarray, env_index) -> np.ndarray:
         """Chooses an action, optionally based on observation obs."""
 
     def forward(self, *args):
@@ -41,14 +41,14 @@ class HardCodedPolicy(policies.BasePolicy, abc.ABC):
 class RandomPolicy(HardCodedPolicy):
     """Returns random actions."""
 
-    def _choose_action(self, obs: np.ndarray) -> np.ndarray:
+    def _choose_action(self, obs: np.ndarray, env_index) -> np.ndarray:
         return self.action_space.sample()
 
 
 class ZeroPolicy(HardCodedPolicy):
     """Returns constant zero action."""
 
-    def _choose_action(self, obs: np.ndarray) -> np.ndarray:
+    def _choose_action(self, obs: np.ndarray, env_index) -> np.ndarray:
         return np.zeros(self.action_space.shape, dtype=self.action_space.dtype)
 
 

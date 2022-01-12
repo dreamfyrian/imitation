@@ -271,7 +271,7 @@ def _policy_to_callable(
         # are themselves Callable (which we check next). But in their case,
         # we want to use the .predict() method, rather than __call__()
         # (which would call .forward()). So this elif clause must come first!
-
+        policy.env_to_act_on = venv
         def get_actions(states):
             # pytype doesn't seem to understand that policy is a BaseAlgorithm
             # or BasePolicy here, rather than a Callable
@@ -498,9 +498,18 @@ def flatten_trajectories(
             infos = traj.infos
         parts["infos"].append(infos)
 
-    cat_parts = {
-        key: np.concatenate(part_list, axis=0) for key, part_list in parts.items()
-    }
+    cat_parts = {}
+    for key, part_list in parts.items():
+        for i, item in enumerate(part_list):
+            part_list[i] = np.squeeze(item)
+        part_list[0] = np.squeeze(part_list[0])
+
+        try:
+            cat_parts[key] = np.concatenate(part_list, axis=0)
+        except ValueError as error:
+            print(" opps, error: {}, key: {}, 0: {}, 12: {}".format(error, key, part_list[0].shape, part_list[12].shape))
+
+
     lengths = set(map(len, cat_parts.values()))
     assert len(lengths) == 1, f"expected one length, got {lengths}"
     return types.Transitions(**cat_parts)
