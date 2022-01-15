@@ -502,7 +502,6 @@ def flatten_trajectories(
     for key, part_list in parts.items():
         for i, item in enumerate(part_list):
             part_list[i] = np.squeeze(item)
-        part_list[0] = np.squeeze(part_list[0])
 
         try:
             cat_parts[key] = np.concatenate(part_list, axis=0)

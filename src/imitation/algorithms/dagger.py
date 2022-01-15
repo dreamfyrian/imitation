@@ -9,8 +9,9 @@ policy.
 import abc
 import dataclasses
 import logging
-import os
+import os, sys
 import pathlib
+import glob
 from typing import Callable, List, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -22,6 +23,10 @@ from imitation.algorithms import base, bc
 from imitation.data import rollout, types
 from imitation.util import logger, util
 
+LOGGING_LEVEL = logging.INFO
+logging.basicConfig(stream = sys.stdout, level=LOGGING_LEVEL)
+
+BETA_SCHEDULE_ROUNDS = 15
 
 class BetaSchedule(abc.ABC):
     """Computes beta (% of time demonstration action used) from training round."""
@@ -303,6 +308,7 @@ class DAggerTrainer(base.BaseImitationAlgorithm):
         *,
         venv: vec_env.VecEnv,
         scratch_dir: types.AnyPath,
+        presaved_demos: Optional[types.AnyPath] = None,
         beta_schedule: Callable[[int], float] = None,
         bc_trainer: bc.BC,
         custom_logger: Optional[logger.HierarchicalLogger] = None,
@@ -322,9 +328,10 @@ class DAggerTrainer(base.BaseImitationAlgorithm):
         super().__init__(custom_logger=custom_logger)
 
         if beta_schedule is None:
-            beta_schedule = LinearBetaSchedule(15)
+            beta_schedule = LinearBetaSchedule(BETA_SCHEDULE_ROUNDS)
         self.beta_schedule = beta_schedule
         self.scratch_dir = pathlib.Path(scratch_dir)
+        self.presaved_demos = pathlib.Path(presaved_demos) if presaved_demos is not None else None
         self.venv = venv
         self.round_num = 0
         self._last_loaded_round = -1
@@ -368,6 +375,7 @@ class DAggerTrainer(base.BaseImitationAlgorithm):
             num_demos_by_round.append(len(demo_paths))
         logging.info(f"Loaded {len(self._all_demos)} total")
         demo_transitions = rollout.flatten_trajectories(self._all_demos)
+        logging.info(f"Total loaded observations: {len(demo_transitions)}")
         return demo_transitions, num_demos_by_round
 
     def _get_demo_paths(self, round_dir):
@@ -380,7 +388,16 @@ class DAggerTrainer(base.BaseImitationAlgorithm):
     def _demo_dir_path_for_round(self, round_num: Optional[int] = None) -> pathlib.Path:
         if round_num is None:
             round_num = self.round_num
-        return self.scratch_dir / "demos" / f"round-{round_num:03d}"
+        base_path = self.scratch_dir / "demos" 
+        if self.presaved_demos:
+            base_path = self.presaved_demos
+        return base_path / f"round-{round_num:03d}"
+        
+    def _get_number_of_presaved_demo_rounds(self) -> int:
+        if not self.presaved_demos:
+            return 0
+        paths = glob.glob(os.path.join(self.presaved_demos,'round-[0-9][0-9][0-9]'))
+        return len(paths)
 
     def _try_load_demos(self) -> None:
         """Load the dataset for this round into self.bc_trainer as a DataLoader."""
@@ -525,6 +542,7 @@ class SimpleDAggerTrainer(DAggerTrainer):
         scratch_dir: types.AnyPath,
         expert_policy: policies.BasePolicy,
         expert_trajs: Optional[Sequence[types.Trajectory]] = None,
+        presaved_demos: Optional[types.AnyPath] = None,
         **dagger_trainer_kwargs,
     ):
         """Builds SimpleDAggerTrainer.
@@ -539,6 +557,8 @@ class SimpleDAggerTrainer(DAggerTrainer):
             expert_policy: The expert policy used to generate synthetic demonstrations.
             expert_trajs: Optional starting dataset that is inserted into the round 0
                 dataset.
+            presaved_demos: optional presaved demos for each round (with robot data injected)
+                attention: dagger can run only for as many rounds it can retrieve
             dagger_trainer_kwargs: Other keyword arguments passed to the
                 superclass initializer `DAggerTrainer.__init__`.
 
@@ -546,7 +566,7 @@ class SimpleDAggerTrainer(DAggerTrainer):
             ValueError: The observation or action space does not match between
                 `venv` and `expert_policy`.
         """
-        super().__init__(venv=venv, scratch_dir=scratch_dir, **dagger_trainer_kwargs)
+        super().__init__(venv=venv, scratch_dir=scratch_dir, presaved_demos = presaved_demos, **dagger_trainer_kwargs)
         self.expert_policy = expert_policy
         if expert_policy.observation_space != self.venv.observation_space:
             raise ValueError(
@@ -568,11 +588,27 @@ class SimpleDAggerTrainer(DAggerTrainer):
                     self._demo_dir_path_for_round(),
                     prefix="initial_data",
                 )
+    
+    def _train_with_presaved_demos(self, bc_train_kwargs) -> None:
+    
+        num_rounds = self._get_number_of_presaved_demo_rounds()
+        if num_rounds == 0:
+            logging.info("No presaved demo rounds found! Exiting..")
+        else:
+            logging.info("Beginning training with {} rounds".format(num_rounds))
+            
+        for round in range(num_rounds):
+            self._logger.record("dagger/round_num", round)
+
+            # `logger.dump` is called inside BC.train within the following fn call:
+            self.extend_and_update(bc_train_kwargs)
+                   
 
     def train(
         self,
         total_timesteps: int,
         *,
+        max_rounds = 10,
         rollout_round_min_episodes: int = 3,
         rollout_round_min_timesteps: int = 500,
         bc_train_kwargs: Optional[dict] = None,
@@ -599,6 +635,7 @@ class SimpleDAggerTrainer(DAggerTrainer):
                 rounded up to finish the minimum number of episdoes or timesteps in the
                 last DAgger training round, and the environment timesteps are executed
                 in multiples of `self.venv.num_envs`.
+                Tio: set to 1 to run 1 round which is equivalent to behavioral cloning
             rollout_round_min_episodes: The number of episodes the must be completed
                 completed before a dataset aggregation step ends.
             rollout_round_min_timesteps: The number of environment timesteps that must
@@ -610,10 +647,17 @@ class SimpleDAggerTrainer(DAggerTrainer):
                 `self.venv` by default. If neither of the `n_epochs` and `n_batches`
                 keys are provided, then `n_epochs` is set to `self.DEFAULT_N_EPOCHS`.
         """
+        
+        if self.presaved_demos:
+            logging.info("Training with presaved demos <{}>".format(self.presaved_demos))
+            return self._train_with_presaved_demos(bc_train_kwargs)
+
+        logging.info("Start training with on the fly generated trajectories")
+        
         total_timestep_count = 0
         round_num = 0
 
-        while total_timestep_count < total_timesteps:
+        while total_timestep_count < total_timesteps and round_num < max_rounds:
             collector = self.get_trajectory_collector()
             round_episode_count = 0
             round_timestep_count = 0

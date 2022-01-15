@@ -10,6 +10,7 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Tuple, Type, Unio
 import gym
 import numpy as np
 import torch as th
+import logging
 import tqdm.autonotebook as tqdm
 from stable_baselines3.common import policies, utils, vec_env
 
@@ -376,6 +377,7 @@ class BC(algo_base.DemonstrationAlgorithm):
             self.optimizer.step()
 
             if batch_num % log_interval == 0:
+                logging.info("BC: start evaluation for batch_num:{}".format(batch_num))
                 for stats in [stats_dict_it, stats_dict_loss]:
                     for k, v in stats.items():
                         self.logger.record(f"bc/{k}", v)
